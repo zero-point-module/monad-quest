@@ -35,10 +35,11 @@ import java.util.UUID;
  * a bone/cream {@code front} panel with dark "ink" text nudged toward the
  * camera so it renders over the frame.
  *
- * Depth/overlap: displays use seeThrough=false so the depth buffer sorts the
- * panel over its frame (and the bubble over/under nameplates and other
- * holograms) instead of smearing — the cause of text rendering on top of each
- * other when seeThrough is on. The stack is also raised above the username tag.
+ * Depth/overlap: displays use seeThrough=true so a bubble is never CUT OFF by
+ * world geometry (trees, walls, the block the agent stands beside). Without the
+ * depth buffer sorting panel-vs-frame, the panel relies on a generous local +Z
+ * nudge toward the camera ({@code FRONT_Z}) to render over its frame; stacked
+ * bubbles never overlap spatially, so they don't smear against each other.
  *
  * Lifetime: a bubble holds fully visible for {@code hold-ms}, then fades out
  * smoothly over {@code fade-ms} (stepped every tick) before despawning. The
@@ -83,9 +84,9 @@ public final class BubbleManager {
      *  alone shows no bottom border at all. */
     private static final float TEXT_BLOCK_HEIGHT = 0.25f;
     /** Local +Z is toward the camera for CENTER billboards; pushes the panel over
-     *  the frame so the center never z-fights. Flip sign if the frame ever covers
-     *  the text. */
-    private static final float FRONT_Z = 0.02f;
+     *  the frame so the center never z-fights. Generous because seeThrough skips
+     *  the depth buffer — distance-to-camera is all that orders the two layers. */
+    private static final float FRONT_Z = 0.05f;
 
     private final SilkMonadPlugin plugin;
     private final Map<UUID, Deque<Bubble>> bubbles = new HashMap<>();
@@ -241,7 +242,7 @@ public final class BubbleManager {
                                           float scaleX, float scaleY, float yOffset, float zOffset, byte textOpacity) {
         TextDisplay td = (TextDisplay) loc.getWorld().spawnEntity(loc, EntityType.TEXT_DISPLAY);
         td.setBillboard(Display.Billboard.CENTER);     // always face the viewer
-        td.setSeeThrough(false);                       // depth-sort vs frame/nameplate/holograms
+        td.setSeeThrough(true);                        // never cut off by blocks (FRONT_Z orders the layers)
         td.setShadowed(false);                         // crisp dark text on cream
         td.setPersistent(false);                       // never written to the world save
         td.setLineWidth(LINE_WIDTH_PX);

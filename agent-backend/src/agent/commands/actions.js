@@ -529,15 +529,20 @@ export const actionsList = [
     },
     {
         name: '!createQuest',
-        description: "Quest master only: create an on-chain quest on Monad — escrow a MON reward, commit to a secret item, and AUTOMATICALLY spawn a chest holding that item in the world. Call this ONCE, then announce the quest id, reward, and clue to the players. Do not call it again while a quest is open.",
+        description: "Quest master only: create an on-chain quest on Monad — escrow a MON reward, commit to a secret item, and AUTOMATICALLY spawn a chest holding that item in the world (the previous quest's chest is removed). Announce the quest id, reward, clue, and chest location to the players. Only one quest can be OPEN at a time — create the next one after the current quest is solved.",
         params: {
             'reward': { type: 'float', description: 'Amount of native MON to escrow as the reward for the winner.', domain: [0, Number.MAX_SAFE_INTEGER, '(]'] },
             'secret': { type: 'string', description: 'The secret item you choose to hide (this is the answer). Use a plain lowercase item id, e.g. golden_apple, diamond, emerald, nether_star, golden_carrot, ender_pearl.' },
             'clue': { type: 'string', description: 'A short human-readable clue to where the chest is, announced to the players.' }
         },
         perform: async function (agent, reward, secret, clue) {
-            if (agent.questCreated)
-                return `You already have a quest running this session — only one quest at a time. Do NOT create another; narrate the hunt and cheer the players on. (Restart the agents to run a fresh quest.)`;
+            // One OPEN quest at a time — but the moment it's solved (or cancelled)
+            // the next can begin, so the game runs continuously.
+            try {
+                const latest = await quests.latestQuest();
+                if (latest && !latest.solved && !latest.cancelled)
+                    return `Quest #${latest.questId} is still OPEN — one quest at a time. Narrate the hunt and taunt the racers; create the next quest only after this one is solved.`;
+            } catch { /* chain read failed — fall through; createQuest itself surfaces real errors */ }
             // Spawn the chest FIRST (same secret we'll commit on-chain) so the world is ready
             // before we announce, and an invalid item surfaces before any MON is escrowed.
             let chestNote;
@@ -550,7 +555,6 @@ export const actionsList = [
             }
             try {
                 const { hash, questId, factory } = await quests.createQuest(agent.name, secret, reward, clue);
-                agent.questCreated = true;
                 // cosmetic flair: shower the quest master in 5 XP bottles + 5 regen splash potions (never blocks the quest)
                 try {
                     const qp = agent.bot.entity.position;
@@ -587,6 +591,13 @@ export const actionsList = [
                 if (res.won) {
                     // cosmetic flair: fireworks on the winner (never blocks the result)
                     try { const wp = agent.bot.entity.position; celebrateFireworks(wp.x, wp.y, wp.z).catch(() => {}); } catch { /* flair only */ }
+                    // Event-driven solve notification: bots do NOT hear each other's public
+                    // chat, so without this the quest master only learns of the win when he
+                    // happens to poll. Ping him directly so the next quest starts right away.
+                    try {
+                        if (agent.name !== 'questmaster' && convoManager.otherAgentInGame('questmaster'))
+                            convoManager.startConversation('questmaster', `I just solved quest #${quest_id} on-chain and the reward is mine — raise the next one, Master!`);
+                    } catch { /* notification is best-effort — never block the win */ }
                     return `You solved quest #${quest_id}! The MON reward was paid to your wallet. Transaction hash: ${res.hash}`;
                 }
                 return `Your claim on quest #${quest_id} did not win: ${res.reason}. If the quest is already solved, stop claiming and just chat.`;

@@ -93,7 +93,7 @@ function factoryAddress() {
 // Actionable text per custom error, so an agent reading the reason can self-correct
 // (e.g. realize it has a stale quest id) instead of concluding the contract is broken.
 const REVERT_HINTS = {
-    WrongAnswer: 'WrongAnswer — that is NOT the secret this quest committed to. You may be claiming the wrong quest id: check !latestQuest and submit the exact item id from the quest chest.',
+    WrongAnswer: 'WrongAnswer — that is NOT the secret this quest committed to. Either you are claiming the wrong quest id (check !latestQuest), or you read an OLD chest left over from a previous quest — go to the chest location the Quest Master announced for THIS quest and read that one.',
     QuestClosed: 'QuestClosed — this quest is already solved or cancelled. Stop claiming it.',
     QuestNotFound: 'QuestNotFound — no quest with that id exists. Use !latestQuest to find the current one.',
     NoReward: 'NoReward — a quest needs a non-zero MON reward escrowed.',

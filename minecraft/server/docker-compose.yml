@@ -11,6 +11,8 @@ services:
       MEMORY: '2G'
       TZ: 'UTC'
       ONLINE_MODE: 'FALSE'
+      MODE: 'adventure'
+      FORCE_GAMEMODE: 'TRUE'
       ALLOW_NETHER: 'FALSE'
       VIEW_DISTANCE: '6'
       SIMULATION_DISTANCE: '6'
@@ -30,7 +32,7 @@ services:
         gamerule randomTickSpeed 0
         gamerule mobGriefing false
         time set noon
-        weather clear 1000000
+        weather rain 1000000
     tty: true
     stdin_open: true
     restart: unless-stopped

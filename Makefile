@@ -211,8 +211,12 @@ mc-music: _check-docker ## Loop background music (Ctrl-C to stop):  make mc-musi
 	@echo ">> Looping minecraft:music_disc.$(SONG) for all players every $(LOOP)s — Ctrl-C to stop."
 	@trap 'docker compose -f "$(COMPOSE)" exec -T minecraft rcon-cli "stopsound @a record minecraft:music_disc.$(SONG)" >/dev/null 2>&1; echo; echo ">> Music stopped."; exit 0' INT TERM; \
 	while true; do \
-		docker compose -f "$(COMPOSE)" exec -T minecraft rcon-cli "execute at @a run playsound minecraft:music_disc.$(SONG) record @s ~ ~ ~ $(VOL) 1" >/dev/null || { echo "!! RCON failed — is the server up? Try: make mc-up"; exit 1; }; \
-		sleep $(LOOP); \
+		if docker compose -f "$(COMPOSE)" exec -T minecraft rcon-cli "execute at @a run playsound minecraft:music_disc.$(SONG) record @s ~ ~ ~ $(VOL) 1" >/dev/null 2>&1; then \
+			sleep $(LOOP); \
+		else \
+			echo "!! RCON failed (server down or restarting — e.g. make mc-plugin) — retrying in 10s..."; \
+			sleep 10; \
+		fi; \
 	done
 
 mc-music-stop: _check-docker ## Silence mc-music (stops the 'record' sound category for everyone)
@@ -255,15 +259,28 @@ agents: _check-node ## Run the agents (cd agent-backend && node main.js) — Min
 		cd "$(AGENTS)" && node main.js
 
 # ── reset: fresh quest state (NEVER touches the world) ───────────────────────
-# Stops any running agents, deletes the mock quest-state file, AND clears the
-# bots' persistent memories (bots/*/memory.json). The memory wipe matters: each
-# run creates a NEW on-chain quest, and a remembered quest id from a previous
-# session sends the players claiming a stale quest whose answer no longer
-# matches (WrongAnswer reverts). Histories are kept for debugging.
+# Stops any running agents, deletes the mock quest-state file, clears the bots'
+# persistent memories (bots/*/memory.json), AND cancels every open on-chain
+# quest (reclaiming its escrow). The memory wipe matters: each run creates a
+# NEW on-chain quest, and a remembered quest id from a previous session sends
+# the players claiming a stale quest whose answer no longer matches
+# (WrongAnswer reverts). Histories are kept for debugging.
 # Deliberately does NOT touch the Minecraft world.
-reset: ## Stop agents + wipe quest state and bot memories (fresh run; world untouched)
-	@echo ">> Stopping any running agents (node main.js)..."
-	@pkill -f "node main.js" 2>/dev/null && echo "   Stopped running agents." || echo "   No agents were running."
+reset: ## Stop agents, close open quests, wipe quest state + bot memories (world untouched)
+	@echo ">> Stopping any running agents (mindserver + per-agent processes)..."
+	@# main.js is only the mindserver parent — every agent is a separate
+	@# init_agent.js process that would survive the parent's death and keep
+	@# WRITING memory.json, resurrecting the state we are about to wipe.
+	@pkill -f "node main.js" 2>/dev/null && echo "   Stopped mindserver." || echo "   No mindserver was running."
+	@pkill -f "init_agent.js" 2>/dev/null && echo "   Stopped agent processes." || true
+	@# Wait for them to actually exit (they save memory.json on the way down);
+	@# escalate to SIGKILL if anything is still alive after ~10s.
+	@t=0; while pgrep -f "node main.js|init_agent.js" >/dev/null 2>&1 && [ "$$t" -lt 20 ]; do sleep 0.5; t=$$((t+1)); done; \
+	if pgrep -f "node main.js|init_agent.js" >/dev/null 2>&1; then \
+		pkill -9 -f "node main.js|init_agent.js" 2>/dev/null || true; \
+		sleep 1; \
+		echo "   Force-killed lingering agent processes."; \
+	fi
 	@if [ -f "$(QUEST_MOCK)" ]; then \
 		rm -f "$(QUEST_MOCK)"; \
 		echo ">> Deleted $(QUEST_MOCK) — quest state is fresh."; \
@@ -276,6 +293,12 @@ reset: ## Stop agents + wipe quest state and bot memories (fresh run; world unto
 	else \
 		echo ">> No bot memories to clear."; \
 	fi
+	@# Close any open on-chain quests so the new run starts with a clean board
+	@# (reclaims their escrow). Best-effort: an unreachable RPC or missing keys
+	@# must not block the dev loop.
+	@echo ">> Closing any open on-chain quests..."
+	@cd "$(BLOCKCHAIN)" && npm run --silent quests:cancel -- --all \
+		|| echo "   WARNING: could not close open quests (RPC/keys issue?) — continuing."
 	@echo "   (The Minecraft world is untouched.)"
 
 # ── dev: the fast inner loop ─────────────────────────────────────────────────

@@ -8,6 +8,7 @@ import com.silkmonad.chain.Treasury;
 import com.silkmonad.chat.BubbleListener;
 import com.silkmonad.chat.BubbleManager;
 import com.silkmonad.chat.ChatSeparatorListener;
+import com.silkmonad.chat.CommandHighlightListener;
 import com.silkmonad.commands.CrowdCommand;
 import com.silkmonad.commands.SilkCommand;
 import com.silkmonad.commands.UuidCommand;
@@ -116,6 +117,8 @@ public final class SilkMonadPlugin extends JavaPlugin {
         bubbleManager.start();
         getServer().getPluginManager().registerEvents(new BubbleListener(this, bubbleManager), this);
         getServer().getPluginManager().registerEvents(new ChatSeparatorListener(this), this);
+        // Rewrites messages at HIGH priority, so chat AND bubbles get the styled text.
+        getServer().getPluginManager().registerEvents(new CommandHighlightListener(), this);
 
         // Commands
         this.walletCommand = new WalletCommand(this, profiles, holograms);
