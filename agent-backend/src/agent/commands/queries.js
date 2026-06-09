@@ -7,6 +7,7 @@ import { load } from 'cheerio';
 import { formatEther } from 'viem';
 import { publicClient } from '../../../../blockchain/config.js';
 import { getAddress } from '../../../../blockchain/wallets.js';
+import * as quests from '../../../../blockchain/quests.js';
 
 const pad = (str) => {
     return '\n' + str + '\n';
@@ -373,6 +374,27 @@ export const queryList = [
             if (!addr)
                 return `No wallet address is on record for ${player_name}.`;
             return `${player_name}'s wallet address is ${addr}.`;
+        }
+    },
+    {
+        name: "!questStatus",
+        description: "Check whether an on-chain quest is still open or already solved (and who won). Use this to decide whether to keep racing for it or just chat.",
+        params: {
+            'quest_id': { type: 'int', description: 'The quest number to check.', domain: [0, Number.MAX_SAFE_INTEGER, '[)'] }
+        },
+        perform: async function (agent, quest_id) {
+            try {
+                const q = await quests.getQuest(quest_id);
+                if (!q)
+                    return `Quest #${quest_id} was not found.`;
+                if (q.cancelled)
+                    return `Quest #${quest_id} was cancelled — nothing to claim.`;
+                if (q.solved)
+                    return `Quest #${quest_id} is already solved by ${q.winner}. It is closed — stop claiming and just chat.`;
+                return `Quest #${quest_id} is OPEN. Reward: ${q.reward} MON. Find the chest and be first to !claim the correct answer.`;
+            } catch (err) {
+                return `Could not read quest #${quest_id}: ${err.shortMessage || err.message}`;
+            }
         }
     },
 ];

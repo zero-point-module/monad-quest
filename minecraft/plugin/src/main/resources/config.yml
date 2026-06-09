@@ -3,3 +3,14 @@ chain:
   chain-id: 10143
   # The wallet that signs /silk give mints lives in data/plugins/SilkMonad/secrets.yml
   # (deployer-private-key). Never commit that file.
+
+# Floating dialogue bubbles above each agent's head (cream panel, dark text).
+# Toggle at runtime with /silk bubbles.
+bubbles:
+  # Milliseconds a bubble stays fully visible before it starts fading.
+  # This is the "2 seconds to start" — raise it if messages vanish too fast to read.
+  hold-ms: 2000
+  # Milliseconds the smooth fade-out takes. Total on-screen time = hold-ms + fade-ms.
+  fade-ms: 600
+  # Max bubbles stacked above one agent at once; the oldest drops off beyond this.
+  max: 4

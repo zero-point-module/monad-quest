@@ -2,10 +2,13 @@ package com.silkmonad.chat;
 
 import com.silkmonad.SilkMonadPlugin;
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.TextColor;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Bukkit;
+import org.bukkit.Color;
 import org.bukkit.Location;
-import org.bukkit.entity.Display.Billboard;
+import org.bukkit.World;
+import org.bukkit.entity.Display;
 import org.bukkit.entity.EntityType;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.TextDisplay;
@@ -22,39 +25,64 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Floating chat bubbles to the upper-left of each player. Newest sits on top,
- * older slides below. Stack heights are calculated from each bubble's line
- * count so multi-line messages don't overlap the bubble above them.
+ * Floating dialogue bubbles directly above each agent's head. The newest message
+ * sits just above the head; previous messages stack upward as new ones arrive.
+ *
+ * Look: a bone/cream panel with dark "ink" text for strong contrast against the
+ * world, full-bright so it stays legible at night or in shadow.
+ *
+ * Lifetime: each bubble holds fully visible for {@code hold-ms}, then fades out
+ * smoothly over {@code fade-ms} (stepped every server tick) before despawning.
+ * All three knobs live in config.yml ({@code bubbles.hold-ms/fade-ms/max}).
+ *
+ * Smoothness/edge-cases handled: async chat is hopped to the main thread before
+ * any entity work; bubbles follow the agent via short-interpolated teleports
+ * (skipped when idle to avoid packet spam); they slide to fill the gap when one
+ * above expires; they are non-persistent (never saved to the world) and are
+ * cleaned up on quit/death/world-mismatch, on toggle-off, and on plugin disable.
  */
 public final class BubbleManager {
 
-    private static final long LIFETIME_MS = 10_000L;
-    private static final int MAX_BUBBLES = 2;
-    private static final long TICK_INTERVAL = 4L; // 5x/sec
+    // ── cadence ──────────────────────────────────────────────────────────────
+    /** Run every tick so both follow and fade are smooth (20 Hz). */
+    private static final long TICK_INTERVAL = 1L;
+    /** Position-interpolation window for each follow teleport (ticks). */
+    private static final int TELEPORT_DURATION = 2;
 
-    /** Horizontal distance from the player to the bubble column. */
-    private static final double LEFT_DIST = 2.0;
-    /** Y of the BOTTOM bubble (oldest) — anchored just above the player's head. */
-    private static final double BASE_Y = 2.0;
+    // ── geometry ─────────────────────────────────────────────────────────────
+    /** Y of the NEWEST bubble — just above the agent's head; older ones stack up. */
+    private static final double HEAD_OFFSET = 2.2;
     /** Approximate vertical space taken by one rendered line of TextDisplay text. */
     private static final double LINE_HEIGHT = 0.27;
     /** Gap between two stacked bubbles. */
-    private static final double GAP = 0.05;
-    /** Same line width we configure on the TextDisplay. */
+    private static final double GAP = 0.08;
+    /** Same line width we configure on the TextDisplay (pixels). */
     private static final int LINE_WIDTH_PX = 180;
     /** Approximate Minecraft default-font glyph width in pixels. */
     private static final double AVG_CHAR_PX = 6.0;
+    /** Don't re-teleport unless the target moved at least this far (squared blocks). */
+    private static final double MOVE_EPSILON_SQ = 1.0e-4;
 
-    // GUI-panel attempt removed — was breaking the font file when the spacer
-    // provider used the legacy 'space' type. Revert to Minecraft's default
-    // text backdrop, which renders cleanly and doesn't require custom glyphs.
+    // ── colours (bone/cream panel + dark ink text) ───────────────────────────
+    private static final int CREAM_R = 242, CREAM_G = 233, CREAM_B = 208;
+    private static final TextColor INK = TextColor.color(0x2A2620);
+
     private final SilkMonadPlugin plugin;
     private final Map<UUID, Deque<Bubble>> bubbles = new HashMap<>();
+
+    // Tunables (config.yml → bubbles.*).
+    private final long holdMillis;
+    private final long fadeMillis;
+    private final int maxBubbles;
+
     private BukkitTask task;
     private boolean enabled = true;
 
     public BubbleManager(SilkMonadPlugin plugin) {
         this.plugin = plugin;
+        this.holdMillis = Math.max(0L, plugin.getConfig().getLong("bubbles.hold-ms", 2000L));
+        this.fadeMillis = Math.max(1L, plugin.getConfig().getLong("bubbles.fade-ms", 600L));
+        this.maxBubbles = Math.max(1, plugin.getConfig().getInt("bubbles.max", 4));
     }
 
     public boolean isEnabled() {
@@ -64,12 +92,7 @@ public final class BubbleManager {
     /** Toggle bubbles on/off. When disabling, despawns any currently-visible bubbles. */
     public boolean toggle() {
         enabled = !enabled;
-        if (!enabled) {
-            for (Deque<Bubble> dq : bubbles.values()) {
-                for (Bubble b : dq) b.remove();
-            }
-            bubbles.clear();
-        }
+        if (!enabled) clearAll();
         return enabled;
     }
 
@@ -83,37 +106,48 @@ public final class BubbleManager {
             task.cancel();
             task = null;
         }
+        clearAll();
+    }
+
+    private void clearAll() {
         for (Deque<Bubble> dq : bubbles.values()) {
             for (Bubble b : dq) b.remove();
         }
         bubbles.clear();
     }
 
-    /** Call on the main thread when a player sends a chat message. */
+    /** Call on the main thread when a player/agent sends a chat message. */
     public void onChat(Player speaker, Component message) {
         if (!enabled) return;
+        String plain = PlainTextComponentSerializer.plainText().serialize(message);
+        if (plain.isBlank()) return; // nothing to show
+
         Deque<Bubble> dq = bubbles.computeIfAbsent(speaker.getUniqueId(), k -> new ArrayDeque<>());
-        // Trim oldest to make room.
-        while (dq.size() >= MAX_BUBBLES) {
+        // Trim oldest to make room for the newcomer.
+        while (dq.size() >= maxBubbles) {
             Bubble oldest = dq.pollLast();
             if (oldest != null) oldest.remove();
         }
-        int lineCount = estimateLineCount(message);
-        Location loc = stackBase(speaker); // arbitrary initial location; tick repositions
+
+        int lineCount = estimateLineCount(plain);
+        Location loc = stackBase(speaker); // tick() repositions every frame
         TextDisplay td = (TextDisplay) loc.getWorld().spawnEntity(loc, EntityType.TEXT_DISPLAY);
-        td.setBillboard(Billboard.CENTER);
-        td.setSeeThrough(true);
-        td.setShadowed(false);
-        td.setPersistent(false);
+        td.setBillboard(Display.Billboard.CENTER);     // always face the viewer
+        td.setSeeThrough(true);                        // readable even behind terrain
+        td.setShadowed(false);                         // crisp dark text on cream
+        td.setPersistent(false);                       // never written to the world save
         td.setLineWidth(LINE_WIDTH_PX);
-        td.setDefaultBackground(true);
-        td.setTeleportDuration((int) TICK_INTERVAL);
+        td.setDefaultBackground(false);                // use our colour, not the dark default
+        td.setBackgroundColor(Color.fromARGB(255, CREAM_R, CREAM_G, CREAM_B));
+        td.setBrightness(new Display.Brightness(15, 15)); // full-bright: legible at night
+        td.setTeleportDuration(TELEPORT_DURATION);
         td.setTransformation(new Transformation(
                 new Vector3f(0f, 0f, 0f),
                 new AxisAngle4f(),
                 new Vector3f(1f, 1f, 1f),
                 new AxisAngle4f()));
-        td.text(message);
+        td.text(message.colorIfAbsent(INK)); // force dark text where no colour was set
+
         dq.push(new Bubble(td, System.currentTimeMillis(), lineCount));
     }
 
@@ -124,52 +158,75 @@ public final class BubbleManager {
 
     private void tick() {
         long now = System.currentTimeMillis();
-        Iterator<Map.Entry<UUID, Deque<Bubble>>> it = bubbles.entrySet().iterator();
-        while (it.hasNext()) {
-            Map.Entry<UUID, Deque<Bubble>> entry = it.next();
+        long total = holdMillis + fadeMillis;
+
+        Iterator<Map.Entry<UUID, Deque<Bubble>>> mit = bubbles.entrySet().iterator();
+        while (mit.hasNext()) {
+            Map.Entry<UUID, Deque<Bubble>> entry = mit.next();
             Player p = Bukkit.getPlayer(entry.getKey());
             Deque<Bubble> dq = entry.getValue();
-            if (p == null || !p.isOnline()) {
+
+            // Speaker gone (offline/dead) → drop their whole stack.
+            if (p == null || !p.isOnline() || p.isDead()) {
                 for (Bubble b : dq) b.remove();
-                it.remove();
+                mit.remove();
                 continue;
             }
-            // Prune expired (oldest sits at tail).
-            while (!dq.isEmpty() && (now - dq.peekLast().createdAtMillis) > LIFETIME_MS) {
-                Bubble expired = dq.pollLast();
-                expired.remove();
-            }
-            // Position oldest → newest, accumulating y by each bubble's line count.
+
             Location base = stackBase(p);
+            World world = base.getWorld();
             double y = base.getY();
-            Iterator<Bubble> rev = dq.descendingIterator(); // oldest first
-            while (rev.hasNext()) {
-                Bubble b = rev.next();
-                if (!b.display.isDead()) {
-                    b.display.teleport(new Location(base.getWorld(),
-                            base.getX(), y, base.getZ()));
+
+            // Iterate newest (head) → oldest (tail), stacking upward.
+            Iterator<Bubble> it = dq.iterator();
+            while (it.hasNext()) {
+                Bubble b = it.next();
+
+                // Externally removed (e.g. /kill) → forget it; those below slide down.
+                if (b.display.isDead()) {
+                    it.remove();
+                    continue;
                 }
+
+                long age = now - b.bornAtMillis;
+                if (age >= total) { // fully expired
+                    b.remove();
+                    it.remove();
+                    continue;
+                }
+
+                // Follow the agent — only teleport when the target actually moved.
+                Location target = new Location(world, base.getX(), y, base.getZ());
+                Location cur = b.display.getLocation();
+                if (!world.equals(cur.getWorld()) || cur.distanceSquared(target) > MOVE_EPSILON_SQ) {
+                    b.display.teleport(target);
+                }
+
+                // Fade-out window: step the cream panel + text alpha toward 0.
+                if (age >= holdMillis) {
+                    b.fading = true;
+                    double progress = (age - holdMillis) / (double) fadeMillis; // 0..1
+                    int alpha = (int) Math.round(255.0 * (1.0 - Math.min(1.0, progress)));
+                    if (alpha < 0) alpha = 0;
+                    b.display.setBackgroundColor(Color.fromARGB(alpha, CREAM_R, CREAM_G, CREAM_B));
+                    b.display.setTextOpacity((byte) alpha);
+                }
+
                 y += b.lineCount * LINE_HEIGHT + GAP;
             }
+
+            if (dq.isEmpty()) mit.remove();
         }
     }
 
-    /** Base of the bubble column — 2 blocks to the player's left, just above head. */
+    /** Base of the column — centred directly above the agent's head. */
     private static Location stackBase(Player p) {
         Location feet = p.getLocation();
-        double yawRad = Math.toRadians(feet.getYaw());
-        // Right vector is (cos, sin); left is the negation.
-        double lx = -Math.cos(yawRad);
-        double lz = -Math.sin(yawRad);
-        return new Location(feet.getWorld(),
-                feet.getX() + lx * LEFT_DIST,
-                feet.getY() + BASE_Y,
-                feet.getZ() + lz * LEFT_DIST);
+        return new Location(feet.getWorld(), feet.getX(), feet.getY() + HEAD_OFFSET, feet.getZ());
     }
 
-    /** Rough rendered-line count for a Component: explicit newlines + wrap. */
-    private static int estimateLineCount(Component message) {
-        String plain = PlainTextComponentSerializer.plainText().serialize(message);
+    /** Rough rendered-line count for a message: explicit newlines + wrap. */
+    private static int estimateLineCount(String plain) {
         int total = 0;
         for (String segment : plain.split("\n", -1)) {
             int chars = Math.max(1, segment.length());

@@ -2,6 +2,32 @@ import * as skills from '../library/skills.js';
 import settings from '../settings.js';
 import convoManager from '../conversation.js';
 import * as quests from '../../../../blockchain/quests.js';
+import { getAddress } from '../../../../blockchain/wallets.js';
+import { placeQuestChest } from '../library/quest_chest.js';
+import Vec3 from 'vec3';
+
+// Pick a spot for the quest chest within 3 blocks of the quest master, at the QM's own Y
+// level — works on custom maps where a fixed coordinate could land in a wall or the void.
+// Prefers an empty tile with solid ground beneath (reachable, and the chest rests on a
+// floor); falls back to 2 blocks east at the QM's level if nothing clean is found.
+function questChestSpot(bot) {
+    const p = bot.entity.position;
+    const ox = Math.floor(p.x), oy = Math.floor(p.y), oz = Math.floor(p.z);
+    const offsets = [
+        [2, 0], [0, 2], [-2, 0], [0, -2],
+        [2, 2], [2, -2], [-2, 2], [-2, -2],
+        [1, 0], [0, 1], [-1, 0], [0, -1],
+        [3, 0], [0, 3], [-3, 0], [0, -3],
+    ];
+    for (const [dx, dz] of offsets) {
+        const x = ox + dx, y = oy, z = oz + dz;
+        const here = bot.blockAt(new Vec3(x, y, z));
+        const below = bot.blockAt(new Vec3(x, y - 1, z));
+        if (here && below && here.boundingBox === 'empty' && below.boundingBox === 'block')
+            return { x, y, z };
+    }
+    return { x: ox + 2, y: oy, z: oz }; // fallback: still QM-relative, within radius 3
+}
 
 
 function runAsAction (actionFn, resume = false, timeout = -1) {
@@ -502,16 +528,29 @@ export const actionsList = [
     },
     {
         name: '!createQuest',
-        description: "Create an on-chain quest on Monad: escrow a MON reward and commit to the secret answer (the item type hidden in a chest). Use this as the quest master, then announce the quest id, reward, and clue to the players in chat.",
+        description: "Quest master only: create an on-chain quest on Monad — escrow a MON reward, commit to a secret item, and AUTOMATICALLY spawn a chest holding that item in the world. Call this ONCE, then announce the quest id, reward, and clue to the players. Do not call it again while a quest is open.",
         params: {
             'reward': { type: 'float', description: 'Amount of native MON to escrow as the reward for the winner.', domain: [0, Number.MAX_SAFE_INTEGER, '(]'] },
-            'secret': { type: 'string', description: 'The exact item type hidden in the quest chest (this is the answer), e.g. golden_apple.' },
-            'clue': { type: 'string', description: 'A human-readable clue to where the chest is, announced to the players.' }
+            'secret': { type: 'string', description: 'The secret item you choose to hide (this is the answer). Use a plain lowercase item id, e.g. golden_apple, diamond, emerald, nether_star, golden_carrot, ender_pearl.' },
+            'clue': { type: 'string', description: 'A short human-readable clue to where the chest is, announced to the players.' }
         },
         perform: async function (agent, reward, secret, clue) {
+            if (agent.questCreated)
+                return `You already have a quest running this session — only one quest at a time. Do NOT create another; narrate the hunt and cheer the players on. (Restart the agents to run a fresh quest.)`;
+            // Spawn the chest FIRST (same secret we'll commit on-chain) so the world is ready
+            // before we announce, and an invalid item surfaces before any MON is escrowed.
+            let chestNote;
+            try {
+                const spot = questChestSpot(agent.bot);
+                const r = await placeQuestChest(secret, spot.x, spot.y, spot.z);
+                chestNote = `A chest holding your secret was spawned at ${r.pos}, right by you — players can reach it with !searchForBlock("chest", 64).`;
+            } catch (e) {
+                chestNote = `WARNING: the chest could not be auto-spawned (${e.message}). Place it manually: make place-chest SECRET=${secret}.`;
+            }
             try {
                 const { hash, questId, factory } = await quests.createQuest(agent.name, secret, reward, clue);
-                return `Quest #${questId} created on Monad (factory ${factory}, tx ${hash}). Reward: ${reward} MON. Clue: ${clue}. First player to !claim the correct answer wins.`;
+                agent.questCreated = true;
+                return `Quest #${questId} created on Monad (factory ${factory}, tx ${hash}). Reward: ${reward} MON. Clue: ${clue}. ${chestNote} First player to !claim the correct answer wins. NEVER reveal the secret, and never !claim your own quest.`;
             } catch (err) {
                 return `Could not create quest: ${err.shortMessage || err.message}`;
             }
@@ -519,17 +558,27 @@ export const actionsList = [
     },
     {
         name: '!claim',
-        description: "Submit your answer to an on-chain quest on Monad. If it is correct AND you are first, you win the MON reward, paid to your wallet. The answer is the item type you found in the quest chest.",
+        description: "Players only: submit your answer to an on-chain quest on Monad. If it is correct AND you are first, you win the MON reward, paid to your wallet. The answer is the item type you found in the quest chest. Do not claim a quest you created, and stop claiming once a quest is solved.",
         params: {
             'quest_id': { type: 'int', description: 'The quest number announced by the quest master.', domain: [0, Number.MAX_SAFE_INTEGER, '[)'] },
             'answer': { type: 'string', description: 'Your answer — the item type from the chest, e.g. golden_apple.' }
         },
         perform: async function (agent, quest_id, answer) {
             try {
+                // Guard: the quest master can't claim their own quest, and nobody should keep
+                // hammering a quest that's already solved.
+                try {
+                    const q = await quests.getQuest(quest_id);
+                    const me = getAddress(agent.name);
+                    if (q && me && q.creator && q.creator.toLowerCase() === me.toLowerCase())
+                        return `You created quest #${quest_id} — you cannot claim your own reward. Cheer the players on instead.`;
+                    if (q && q.solved)
+                        return `Quest #${quest_id} is already solved by ${q.winner}. Stop claiming and congratulate the winner.`;
+                } catch { /* read failed — fall through; the contract simulate below reverts safely */ }
                 const res = await quests.claim(agent.name, quest_id, answer);
                 if (res.won)
                     return `You solved quest #${quest_id}! The MON reward was paid to your wallet. Transaction hash: ${res.hash}`;
-                return `Your claim on quest #${quest_id} did not win: ${res.reason}`;
+                return `Your claim on quest #${quest_id} did not win: ${res.reason}. If the quest is already solved, stop claiming and just chat.`;
             } catch (err) {
                 return `Could not submit your claim: ${err.shortMessage || err.message}`;
             }

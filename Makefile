@@ -36,6 +36,7 @@ BLOCKCHAIN := $(ROOT)/blockchain
 AGENTS     := $(ROOT)/agent-backend
 COMPOSE    := $(ROOT)/minecraft/server/docker-compose.yml
 QUEST_MOCK := $(AGENTS)/quests-mock.json
+PLUGIN     := $(ROOT)/minecraft/plugin
 
 # ── pin the agents to Node 20 at RUN time (not just install) ──────────────────
 # WHY: `npm install` builds native modules (gl/canvas) for ONE Node ABI, and the
@@ -65,7 +66,7 @@ NODE20 = export NVM_DIR="$${NVM_DIR:-$$HOME/.nvm}"; \
 	fi
 
 # Every target is a command, not a file.
-.PHONY: help install chain mc-up mc-down mc-logs mc-cmd mc-console place-chest agents reset dev \
+.PHONY: help install chain mc-up mc-down mc-logs mc-cmd mc-console place-chest mc-plugin agents reset dev \
         _check-node _check-node-version _check-docker _check-forge
 
 # Default goal: show help when you just run `make`.
@@ -189,14 +190,31 @@ mc-console: _check-docker ## Open an interactive RCON console (type commands; Ct
 # Coords default near spawn — ADJUST to a SURFACE block near where the bots spawn
 # (join the server, press F3 for x/y/z). SECRET must match the questmaster profile.
 # Keep it within ~30 blocks of the bots so !viewChest finds it.
-CHEST_X ?= 0
-CHEST_Y ?= 64
-CHEST_Z ?= 3
+CHEST_X ?= -10
+CHEST_Y ?= 0
+CHEST_Z ?= 29
 SECRET  ?= golden_apple
 place-chest: _check-docker ## Place quest chest w/ secret:  make place-chest CHEST_X=.. CHEST_Y=.. CHEST_Z=.. [SECRET=golden_apple]
 	@echo ">> Placing a chest holding 1 $(SECRET) at $(CHEST_X) $(CHEST_Y) $(CHEST_Z)..."
 	@docker compose -f "$(COMPOSE)" exec -T minecraft rcon-cli 'setblock $(CHEST_X) $(CHEST_Y) $(CHEST_Z) minecraft:chest{Items:[{Slot:0b,id:"minecraft:$(SECRET)",count:1}]}'
 	@echo ">> Done. Verify in-game. If buried/floating, re-run with surface coords (F3)."
+
+# ── plugin: build + hot-deploy the SilkMonad plugin ──────────────────────────
+# build.sh compiles the plugin inside a gradle Docker image (no local Java/Gradle
+# needed) into a shaded jar; `--install` copies it to the server's plugins dir
+# (minecraft/server/data/plugins/SilkMonad.jar). The server only loads plugins at
+# startup and the jar lives on the ./data bind-mount, so we then restart the
+# minecraft container to pick up the new jar (falling back to `up -d` if it's down).
+mc-plugin: _check-docker ## Build the SilkMonad plugin, install it, and restart the MC server
+	@echo ">> Building + installing the SilkMonad plugin (gradle in Docker)..."
+	@"$(PLUGIN)/build.sh" --install
+	@echo ">> Reloading the server to pick up the new jar..."
+	@if [ -n "$$(docker compose -f "$(COMPOSE)" ps -q minecraft 2>/dev/null)" ]; then \
+		docker compose -f "$(COMPOSE)" restart minecraft; \
+		echo ">> Restarted. Follow startup with: make mc-logs   (toggle in-game with /silk bubbles)"; \
+	else \
+		echo ">> Server isn't running — jar is installed and will load on the next 'make mc-up'."; \
+	fi
 
 # ── agents ───────────────────────────────────────────────────────────────────
 # `node main.js` spawns one process per agent and hosts the MindServer UI on
