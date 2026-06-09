@@ -10,6 +10,7 @@
     "deploy": "node scripts/deploy.js",
     "deploy:quests": "node scripts/deploy-quests.js",
     "test:quests": "node scripts/test-quest.js",
+    "quests:cancel": "node scripts/cancel-quests.js",
     "verify": "node scripts/verify.js",
     "fund": "node scripts/fund.js"
   },

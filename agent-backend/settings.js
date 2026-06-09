@@ -32,7 +32,10 @@ const settings = {
     ],
 
     "load_memory": false, // load memory from previous session
-    "init_message": "Respond with hello world and your name", // sends to all on spawn
+    // NOTE: crash/force restarts reload memory regardless of load_memory above
+    // (agent_process.js restarts with load_memory=true) — `make reset` wipes
+    // bots/*/memory.json so a stale quest id can never leak into a fresh run.
+    "init_message": "Introduce yourself in one short line that fits your persona, then get on with your role.", // sends to all on spawn
     "only_chat_with": [], // users that the bots listen to and send general messages to. if empty it will chat publicly
 
     "speak": false,
@@ -54,7 +57,7 @@ const settings = {
     "max_messages": 15, // max number of messages to keep in context
     "num_examples": 3, // number of examples to give to the model
     "max_commands": -1, // max number of commands that can be used in consecutive responses. -1 for no limit
-    "show_command_syntax": "full", // "full", "shortened", or "none"
+    "show_command_syntax": "shortened", // "full", "shortened", or "none" — shortened keeps chat fun to watch: the spoken line plus "*used command*" instead of raw command syntax
     "narrate_behavior": false, // chat simple automatic actions ('Picking up item!') — off so bots act instead of narrating every step
     "chat_bot_messages": true, // publicly chat messages to other bots
 

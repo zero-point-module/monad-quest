@@ -397,4 +397,23 @@ export const queryList = [
             }
         }
     },
+    {
+        name: "!latestQuest",
+        description: "Get the id and status of the NEWEST on-chain quest. ALWAYS use this to confirm which quest id to hunt and claim — remembered quest numbers from earlier sessions are stale.",
+        params: {},
+        perform: async function (agent) {
+            try {
+                const q = await quests.latestQuest();
+                if (!q)
+                    return 'No quests exist on the factory yet — wait for the Quest Master.';
+                if (q.cancelled)
+                    return `The latest quest is #${q.questId}, but it was cancelled — wait for a new one.`;
+                if (q.solved)
+                    return `The latest quest is #${q.questId}, already solved by ${q.winner}. Wait for a new quest; do not claim older ones.`;
+                return `The latest quest is #${q.questId} and it is OPEN. Reward: ${q.reward} MON. Claim THIS id with the exact item from the quest chest.`;
+            } catch (err) {
+                return `Could not read the latest quest: ${err.shortMessage || err.message}`;
+            }
+        }
+    },
 ];

@@ -8,7 +8,7 @@
  * For offline/parallel development without a deployed contract, a file-backed mock with
  * identical signatures lives in ./quests.mock.js — swap the imports there if needed.
  */
-import { keccak256, toBytes, parseEther, formatEther, decodeEventLog } from 'viem';
+import { keccak256, toBytes, parseEther, formatEther, decodeEventLog, BaseError, ContractFunctionRevertedError } from 'viem';
 import { readFileSync } from 'fs';
 import { publicClient } from './config.js';   // shared read client, Monad testnet
 import { getAccount } from './wallets.js';     // { account, walletClient } for an agent
@@ -90,6 +90,26 @@ function factoryAddress() {
     return addr;
 }
 
+// Actionable text per custom error, so an agent reading the reason can self-correct
+// (e.g. realize it has a stale quest id) instead of concluding the contract is broken.
+const REVERT_HINTS = {
+    WrongAnswer: 'WrongAnswer — that is NOT the secret this quest committed to. You may be claiming the wrong quest id: check !latestQuest and submit the exact item id from the quest chest.',
+    QuestClosed: 'QuestClosed — this quest is already solved or cancelled. Stop claiming it.',
+    QuestNotFound: 'QuestNotFound — no quest with that id exists. Use !latestQuest to find the current one.',
+    NoReward: 'NoReward — a quest needs a non-zero MON reward escrowed.',
+    NotCreator: 'NotCreator — only the quest creator can cancel it.',
+    TransferFailed: 'TransferFailed — the reward payout transfer failed.',
+};
+
+// Extract the custom error name from a viem revert; fall back to viem's message.
+function revertReason(e) {
+    const revert = e instanceof BaseError
+        ? e.walk((err) => err instanceof ContractFunctionRevertedError)
+        : null;
+    const name = revert?.data?.errorName;
+    return (name && (REVERT_HINTS[name] || name)) || e.shortMessage || e.message;
+}
+
 // Normalize on BOTH create and claim so the item the bot reads from a chest
 // ("Golden_Apple") matches what the QM committed. The contract hashes raw bytes;
 // because every call here normalizes first, the on-chain compare is exact.
@@ -135,14 +155,54 @@ export async function claim(agentName, questId, answer) {
         });
     } catch (e) {
         // WrongAnswer / QuestClosed / QuestNotFound surface here without a tx.
-        return { ok: false, won: false, reason: e.shortMessage || e.message };
+        return { ok: false, won: false, reason: revertReason(e) };
     }
     const hash = await walletClient.writeContract({
         address, abi: QUEST_FACTORY_ABI, functionName: 'claim', args,
     });
     const receipt = await publicClient.waitForTransactionReceipt({ hash, timeout: 60_000 });
-    const won = receipt.status === 'success';
-    return { ok: won, won, hash };
+    if (receipt.status !== 'success')
+        return { ok: false, won: false, hash, reason: 'transaction reverted on-chain — most likely a rival claimed first (QuestClosed).' };
+    return { ok: true, won: true, hash };
+}
+
+/**
+ * Creator reclaims the escrow of an open quest. Simulates first so NotCreator /
+ * QuestClosed come back as a clean reason without spending gas.
+ * @returns {{ ok, hash?, reason? }}
+ */
+export async function cancelQuest(agentName, questId) {
+    const { walletClient, account } = getAccount(agentName);
+    const address = factoryAddress();
+    const args = [BigInt(questId)];
+    try {
+        await publicClient.simulateContract({
+            address, abi: QUEST_FACTORY_ABI, functionName: 'cancelQuest',
+            args, account: account.address,
+        });
+    } catch (e) {
+        return { ok: false, reason: revertReason(e) };
+    }
+    const hash = await walletClient.writeContract({
+        address, abi: QUEST_FACTORY_ABI, functionName: 'cancelQuest', args,
+    });
+    const receipt = await publicClient.waitForTransactionReceipt({ hash, timeout: 60_000 });
+    return { ok: receipt.status === 'success', hash };
+}
+
+/**
+ * The newest quest on the factory (highest id) — the one players should target.
+ * Restarted sessions create fresh quests, so stale remembered ids point at old,
+ * unwinnable quests; this is the authoritative "current quest" lookup.
+ * @returns {Promise<null | { questId, creator, reward, solved, cancelled, winner, answerHash }>}
+ */
+export async function latestQuest() {
+    const count = await publicClient.readContract({
+        address: factoryAddress(), abi: QUEST_FACTORY_ABI, functionName: 'questCount',
+    });
+    if (count === 0n) return null;
+    const questId = Number(count - 1n);
+    return { questId, ...(await getQuest(questId)) };
 }
 
 /**

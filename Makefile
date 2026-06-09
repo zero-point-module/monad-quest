@@ -66,7 +66,7 @@ NODE20 = export NVM_DIR="$${NVM_DIR:-$$HOME/.nvm}"; \
 	fi
 
 # Every target is a command, not a file.
-.PHONY: help install chain mc-up mc-down mc-logs mc-cmd mc-console place-chest mc-plugin agents reset dev \
+.PHONY: help install chain mc-up mc-down mc-logs mc-cmd mc-console place-chest mc-music mc-music-stop mc-plugin agents reset dev \
         _check-node _check-node-version _check-docker _check-forge
 
 # Default goal: show help when you just run `make`.
@@ -199,6 +199,25 @@ place-chest: _check-docker ## Place quest chest w/ secret:  make place-chest CHE
 	@docker compose -f "$(COMPOSE)" exec -T minecraft rcon-cli 'setblock $(CHEST_X) $(CHEST_Y) $(CHEST_Z) minecraft:chest{Items:[{Slot:0b,id:"minecraft:$(SECRET)",count:1}]}'
 	@echo ">> Done. Verify in-game. If buried/floating, re-run with surface coords (F3)."
 
+# ── mc-music: loop a background music disc for everyone via RCON ──────────────
+# /playsound plays a disc once, so we re-fire it every LOOP seconds (≈ the track
+# length). Runs in the foreground; Ctrl-C stops the loop AND the music. Override
+# SONG (any disc name) + LOOP (its length, seconds). Common lengths (s):
+#   otherside 195 · pigstep 148 · precipice 358 · relic 308 · wait 238 · cat 185 · blocks 345
+SONG ?= otherside
+LOOP ?= 195
+VOL  ?= 8
+mc-music: _check-docker ## Loop background music (Ctrl-C to stop):  make mc-music [SONG=otherside] [LOOP=195]
+	@echo ">> Looping minecraft:music_disc.$(SONG) for all players every $(LOOP)s — Ctrl-C to stop."
+	@trap 'docker compose -f "$(COMPOSE)" exec -T minecraft rcon-cli "stopsound @a record minecraft:music_disc.$(SONG)" >/dev/null 2>&1; echo; echo ">> Music stopped."; exit 0' INT TERM; \
+	while true; do \
+		docker compose -f "$(COMPOSE)" exec -T minecraft rcon-cli "execute at @a run playsound minecraft:music_disc.$(SONG) record @s ~ ~ ~ $(VOL) 1" >/dev/null || { echo "!! RCON failed — is the server up? Try: make mc-up"; exit 1; }; \
+		sleep $(LOOP); \
+	done
+
+mc-music-stop: _check-docker ## Silence mc-music (stops the 'record' sound category for everyone)
+	@docker compose -f "$(COMPOSE)" exec -T minecraft rcon-cli "stopsound @a record" >/dev/null && echo ">> Music silenced (also stop the mc-music loop if it's still running)."
+
 # ── plugin: build + hot-deploy the SilkMonad plugin ──────────────────────────
 # build.sh compiles the plugin inside a gradle Docker image (no local Java/Gradle
 # needed) into a shaded jar; `--install` copies it to the server's plugins dir
@@ -236,9 +255,13 @@ agents: _check-node ## Run the agents (cd agent-backend && node main.js) — Min
 		cd "$(AGENTS)" && node main.js
 
 # ── reset: fresh quest state (NEVER touches the world) ───────────────────────
-# Stops any running agents, then deletes the mock quest-state file so the next
-# run starts with no quests. Deliberately does NOT touch the Minecraft world.
-reset: ## Stop agents + delete agent-backend/quests-mock.json (fresh quest state; world untouched)
+# Stops any running agents, deletes the mock quest-state file, AND clears the
+# bots' persistent memories (bots/*/memory.json). The memory wipe matters: each
+# run creates a NEW on-chain quest, and a remembered quest id from a previous
+# session sends the players claiming a stale quest whose answer no longer
+# matches (WrongAnswer reverts). Histories are kept for debugging.
+# Deliberately does NOT touch the Minecraft world.
+reset: ## Stop agents + wipe quest state and bot memories (fresh run; world untouched)
 	@echo ">> Stopping any running agents (node main.js)..."
 	@pkill -f "node main.js" 2>/dev/null && echo "   Stopped running agents." || echo "   No agents were running."
 	@if [ -f "$(QUEST_MOCK)" ]; then \
@@ -246,6 +269,12 @@ reset: ## Stop agents + delete agent-backend/quests-mock.json (fresh quest state
 		echo ">> Deleted $(QUEST_MOCK) — quest state is fresh."; \
 	else \
 		echo ">> No quests-mock.json to delete — quest state already fresh."; \
+	fi
+	@if ls "$(AGENTS)/bots"/*/memory.json >/dev/null 2>&1; then \
+		rm -f "$(AGENTS)/bots"/*/memory.json; \
+		echo ">> Cleared bot memories — no stale quest ids carry over (histories kept)."; \
+	else \
+		echo ">> No bot memories to clear."; \
 	fi
 	@echo "   (The Minecraft world is untouched.)"
 

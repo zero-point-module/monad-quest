@@ -56,7 +56,7 @@ That's it: `install` once, `mc-up` once, then `make dev` over and over while you
 | `make mc-console` | Open an interactive server console (RCON) |
 | `make mc-cmd CMD="time set day"` | Run a single server command |
 | `make place-chest SECRET=golden_apple` | Place the quest chest with the secret item |
-| `make reset` | Stop agents + wipe quest state (never touches the world) |
+| `make reset` | Stop agents + wipe quest state and bot memories (never touches the world) |
 
 > [!IMPORTANT]
 > The agents read config relative to their own folder, so your keys **must** live at `agent-backend/keys.json` (copy `agent-backend/keys.example.json` and fill it in). The agents also need **Node 20** (`nvm use` picks it up from `.nvmrc`), and `make dev` checks this for you.

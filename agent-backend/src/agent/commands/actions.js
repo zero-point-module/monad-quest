@@ -4,6 +4,7 @@ import convoManager from '../conversation.js';
 import * as quests from '../../../../blockchain/quests.js';
 import { getAddress } from '../../../../blockchain/wallets.js';
 import { placeQuestChest } from '../library/quest_chest.js';
+import { throwXpBottles, throwSplashPotions, celebrateFireworks } from '../library/quest_fx.js';
 import Vec3 from 'vec3';
 
 // Pick a spot for the quest chest within 3 blocks of the quest master, at the QM's own Y
@@ -550,6 +551,13 @@ export const actionsList = [
             try {
                 const { hash, questId, factory } = await quests.createQuest(agent.name, secret, reward, clue);
                 agent.questCreated = true;
+                // cosmetic flair: shower the quest master in 5 XP bottles + 5 regen splash potions (never blocks the quest)
+                try {
+                    const qp = agent.bot.entity.position;
+                    throwXpBottles(qp.x, qp.y, qp.z, 5)
+                        .then(() => throwSplashPotions(qp.x, qp.y, qp.z, 5, 'regeneration'))
+                        .catch(() => {});
+                } catch { /* flair only */ }
                 return `Quest #${questId} created on Monad (factory ${factory}, tx ${hash}). Reward: ${reward} MON. Clue: ${clue}. ${chestNote} First player to !claim the correct answer wins. NEVER reveal the secret, and never !claim your own quest.`;
             } catch (err) {
                 return `Could not create quest: ${err.shortMessage || err.message}`;
@@ -576,8 +584,11 @@ export const actionsList = [
                         return `Quest #${quest_id} is already solved by ${q.winner}. Stop claiming and congratulate the winner.`;
                 } catch { /* read failed — fall through; the contract simulate below reverts safely */ }
                 const res = await quests.claim(agent.name, quest_id, answer);
-                if (res.won)
+                if (res.won) {
+                    // cosmetic flair: fireworks on the winner (never blocks the result)
+                    try { const wp = agent.bot.entity.position; celebrateFireworks(wp.x, wp.y, wp.z).catch(() => {}); } catch { /* flair only */ }
                     return `You solved quest #${quest_id}! The MON reward was paid to your wallet. Transaction hash: ${res.hash}`;
+                }
                 return `Your claim on quest #${quest_id} did not win: ${res.reason}. If the quest is already solved, stop claiming and just chat.`;
             } catch (err) {
                 return `Could not submit your claim: ${err.shortMessage || err.message}`;
