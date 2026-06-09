@@ -37,8 +37,35 @@ AGENTS     := $(ROOT)/agent-backend
 COMPOSE    := $(ROOT)/minecraft/server/docker-compose.yml
 QUEST_MOCK := $(AGENTS)/quests-mock.json
 
+# ── pin the agents to Node 20 at RUN time (not just install) ──────────────────
+# WHY: `npm install` builds native modules (gl/canvas) for ONE Node ABI, and the
+# repo pins Node 20 (.nvmrc); mindcraft-ce targets Node 18–20. If `make dev` is
+# launched under a NEWER Node (e.g. 24), main.js spawns each agent via
+# process.execPath = that newer node, whose ESM->CJS loader trips
+# ERR_INTERNAL_ASSERTION loading the app's CJS deps -> "Agent process exited with
+# code 1". So the agents MUST run on the SAME Node the install used: Node 20.
+#
+# NODE20 is a shell snippet meant to be inlined at the START of a single recipe
+# shell line, joined to the real command with `&&` (so the active Node it selects
+# applies to that very command). It (1) sources nvm if present and runs
+# `nvm use` — which reads this repo's .nvmrc -> Node 20 (falling back to
+# `nvm use 20`), then (2) HARD-FAILS if the resulting `node` major is not 20.
+# Note the `$$` (Make-escaped `$`) and the `:-` guards: recipes run under
+# `.SHELLFLAGS := -eu -o pipefail -c`, so unset vars (NVM_DIR) would otherwise
+# abort via `set -u`.
+NODE20 = export NVM_DIR="$${NVM_DIR:-$$HOME/.nvm}"; \
+	if [ -s "$$NVM_DIR/nvm.sh" ]; then \
+		. "$$NVM_DIR/nvm.sh"; \
+		nvm use >/dev/null 2>&1 || nvm use 20 >/dev/null 2>&1 || true; \
+	fi; \
+	NODE_MAJOR="$$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"; \
+	if [ "$$NODE_MAJOR" != "20" ]; then \
+		echo "ERROR: agents must run on Node 20 (matches the .nvmrc + the native modules built during 'make install'). Run: nvm use  (or install Node 20: nvm install 20). Current: $$(node -v 2>/dev/null || echo none)." >&2; \
+		exit 1; \
+	fi
+
 # Every target is a command, not a file.
-.PHONY: help install chain mc-up mc-down mc-logs agents reset dev \
+.PHONY: help install chain mc-up mc-down mc-logs mc-cmd mc-console place-chest agents reset dev \
         _check-node _check-node-version _check-docker _check-forge
 
 # Default goal: show help when you just run `make`.
@@ -148,6 +175,29 @@ mc-down: _check-docker ## Stop the local Minecraft server (docker compose down) 
 mc-logs: _check-docker ## Tail the Minecraft server logs (docker compose logs -f)
 	@docker compose -f "$(COMPOSE)" logs -f
 
+# ── send commands to the server (RCON) ───────────────────────────────────────
+# rcon-cli ships inside the itzg image and auto-uses the RCON password.
+mc-cmd: _check-docker ## Run one server command via RCON:  make mc-cmd CMD="say hi"
+	@test -n "$(CMD)" || { echo 'Usage: make mc-cmd CMD="<server command>"  (e.g. CMD="time set day")'; exit 1; }
+	@docker compose -f "$(COMPOSE)" exec -T minecraft rcon-cli "$(CMD)"
+
+mc-console: _check-docker ## Open an interactive RCON console (type commands; Ctrl-D to exit)
+	@echo ">> RCON console — type server commands WITHOUT the leading slash. Ctrl-D to exit."
+	@docker compose -f "$(COMPOSE)" exec minecraft rcon-cli
+
+# ── place-chest: drop the quest chest holding the secret item ─────────────────
+# Coords default near spawn — ADJUST to a SURFACE block near where the bots spawn
+# (join the server, press F3 for x/y/z). SECRET must match the questmaster profile.
+# Keep it within ~30 blocks of the bots so !viewChest finds it.
+CHEST_X ?= 0
+CHEST_Y ?= 64
+CHEST_Z ?= 3
+SECRET  ?= golden_apple
+place-chest: _check-docker ## Place quest chest w/ secret:  make place-chest CHEST_X=.. CHEST_Y=.. CHEST_Z=.. [SECRET=golden_apple]
+	@echo ">> Placing a chest holding 1 $(SECRET) at $(CHEST_X) $(CHEST_Y) $(CHEST_Z)..."
+	@docker compose -f "$(COMPOSE)" exec -T minecraft rcon-cli 'setblock $(CHEST_X) $(CHEST_Y) $(CHEST_Z) minecraft:chest{Items:[{Slot:0b,id:"minecraft:$(SECRET)",count:1}]}'
+	@echo ">> Done. Verify in-game. If buried/floating, re-run with surface coords (F3)."
+
 # ── agents ───────────────────────────────────────────────────────────────────
 # `node main.js` spawns one process per agent and hosts the MindServer UI on
 # :8080. Runs from agent-backend/ so cwd-relative config (keys.json, tokens.json,
@@ -160,7 +210,12 @@ agents: _check-node ## Run the agents (cd agent-backend && node main.js) — Min
 	fi
 	@echo "   Note: connects to the server at the 'host' in agent-backend/settings.js."
 	@echo "         For the LOCAL Docker server set host to \"localhost\" (or MINECRAFT_PORT=25565)."
-	@cd "$(AGENTS)" && node main.js
+	@# Select Node 20 (via nvm + .nvmrc) and HARD-FAIL otherwise, THEN run node — all
+	@# in ONE shell so the Node that `nvm use` activates is the one that runs main.js
+	@# (and that main.js hands to every spawned agent via process.execPath).
+	@$(NODE20) && \
+		echo "   Using $$(node -v) (pinned to Node 20 to match the install)." && \
+		cd "$(AGENTS)" && node main.js
 
 # ── reset: fresh quest state (NEVER touches the world) ───────────────────────
 # Stops any running agents, then deletes the mock quest-state file so the next

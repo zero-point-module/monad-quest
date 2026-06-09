@@ -9,7 +9,7 @@ export class SelfPrompter {
         this.interrupt = false;
         this.prompt = '';
         this.idle_time = 0;
-        this.cooldown = 2000;
+        this.cooldown = 5000; // ms between self-prompted actions when idle — raise to slow solo chatter
     }
 
     start(prompt) {

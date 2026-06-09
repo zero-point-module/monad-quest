@@ -268,7 +268,7 @@ The logic is as follows:
 - New messages received during the delay will reset the delay following this logic, and be queued to respond in bulk
 */
 const talkOverActions = ['stay', 'followPlayer', 'mode:']; // all mode actions
-const fastDelay = 200;
+const fastDelay = 3000; // ms a bot waits before replying to another bot — raise to slow conversations down
 const longDelay = 5000;
 async function _scheduleProcessInMessage(sender, received, convo) {
     if (convo.inMessageTimer)
