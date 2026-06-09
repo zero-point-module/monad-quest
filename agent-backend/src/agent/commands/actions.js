@@ -123,9 +123,12 @@ export const actionsList = [
             'player_name': {type: 'string', description: 'The name of the player to go to.'},
             'closeness': {type: 'float', description: 'How close to get to the player.', domain: [0, Infinity]}
         },
+        // 1 minute timeout: chasing a MOVING target (especially a human spectator)
+        // can re-path forever, freezing the agent's whole loop — the questmaster
+        // once hung here mid-show and stopped creating quests.
         perform: runAsAction(async (agent, player_name, closeness) => {
             await skills.goToPlayer(agent.bot, player_name, closeness);
-        })
+        }, false, 1)
     },
     {
         name: '!followPlayer',
