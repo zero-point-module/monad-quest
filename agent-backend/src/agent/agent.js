@@ -236,6 +236,10 @@ export class Agent {
             if (message === "") return;
             if (username === this.name) return;
             if (settings.only_chat_with.length > 0 && !settings.only_chat_with.includes(username)) return;
+            // Bot-to-bot talk flows through the mindserver, so everything arriving here
+            // is from a HUMAN — with ignore_human_chat the cast plays on regardless of
+            // what spectators type (their outgoing public chat is unaffected).
+            if (settings.ignore_human_chat && !convoManager.isOtherAgent(username)) return;
             try {
                 if (ignore_messages.some((m) => message.startsWith(m))) return;
 

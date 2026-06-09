@@ -37,6 +37,7 @@ const settings = {
     // bots/*/memory.json so a stale quest id can never leak into a fresh run.
     "init_message": "Introduce yourself in one short line that fits your persona, then get on with your role.", // sends to all on spawn
     "only_chat_with": [], // users that the bots listen to and send general messages to. if empty it will chat publicly
+    "ignore_human_chat": true, // the cast ignores chat from human spectators entirely (bots still chat publicly so humans can watch)
 
     "speak": false,
     // allows all bots to speak through text-to-speech. 
